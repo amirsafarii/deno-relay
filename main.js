@@ -1,59 +1,72 @@
-export default {
-  async fetch(req) {
-    const TARGET_DOMAIN = Deno.env.get("TARGET_DOMAIN");
+const TARGET_DOMAIN = Deno.env.get("TARGET_DOMAIN") || "";
 
-    if (!TARGET_DOMAIN) {
-      return new Response("TARGET_DOMAIN not set", { status: 500 });
-    }
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+]);
 
-    const url = new URL(req.url);
+function makeRequestHeaders(req) {
+  const headers = new Headers(req.headers);
 
-    const targetUrl =
-      TARGET_DOMAIN.replace(/\/+$/, "") +
-      url.pathname +
-      url.search;
+  for (const key of headers.keys()) {
+    const lower = key.toLowerCase();
 
-    // ساخت header ها
-    const headers = new Headers(req.headers);
+    if (HOP_BY_HOP_HEADERS.has(lower)) headers.delete(key);
+    if (lower.startsWith("x-forwarded")) headers.delete(key);
+  }
 
-    // حذف hop-by-hop headers
-    const remove = [
-      "connection",
-      "keep-alive",
-      "proxy-authenticate",
-      "proxy-authorization",
-      "te",
-      "trailer",
-      "transfer-encoding",
-      "upgrade"
-    ];
+  const ip = req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for");
+  if (ip) headers.set("x-forwarded-for", ip);
 
-    remove.forEach((h) => headers.delete(h));
+  return headers;
+}
 
-    headers.set("host", new URL(TARGET_DOMAIN).hostname);
+function makeResponseHeaders(headers) {
+  const out = new Headers();
 
-    try {
-      const upstream = await fetch(targetUrl, {
-        method: req.method,
-        headers,
-        body: req.body,
-        redirect: "manual"
-      });
-
-      const resHeaders = new Headers(upstream.headers);
-
-      remove.forEach((h) => resHeaders.delete(h));
-
-      resHeaders.set("x-relay", "deno-deploy-relay");
-
-      return new Response(upstream.body, {
-        status: upstream.status,
-        headers: resHeaders
-      });
-    } catch (err) {
-      return new Response("Upstream error: " + err.message, {
-        status: 502
-      });
+  for (const [k, v] of headers.entries()) {
+    if (!HOP_BY_HOP_HEADERS.has(k.toLowerCase())) {
+      out.set(k, v);
     }
   }
-};
+
+  out.set("x-relay", "deno-relay");
+  return out;
+}
+
+export default async function handler(req) {
+  if (!TARGET_DOMAIN) {
+    return new Response("TARGET_DOMAIN missing", { status: 500 });
+  }
+
+  const url = new URL(req.url);
+
+  const targetUrl = TARGET_DOMAIN + url.pathname + url.search;
+
+  const options = {
+    method: req.method,
+    headers: makeRequestHeaders(req),
+    redirect: "manual"
+  };
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    options.body = req.body;
+  }
+
+  try {
+    const upstream = await fetch(targetUrl, options);
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: makeResponseHeaders(upstream.headers)
+    });
+  } catch (e) {
+    return new Response("relay error: " + e.message, { status: 502 });
+  }
+}
