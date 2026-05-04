@@ -82,51 +82,54 @@ function errorResponse(message, status = 500) {
   );
 }
 
-export default async function handler(req) {
-  // هلت چک ساده برای تست سلامت سرویس
-  if (req.method === "GET" && new URL(req.url).pathname === "/health") {
-    return new Response(
-      JSON.stringify({ status: "ok", target: TARGET_DOMAIN || "not-set" }),
-      { headers: { "content-type": "application/json" } }
-    );
-  }
+// ✅ الگوی صحیح برای Deno Deploy: export default { fetch: ... }
+export default {
+  async fetch(req) {
+    // هلت چک ساده برای تست سلامت سرویس
+    if (req.method === "GET" && new URL(req.url).pathname === "/health") {
+      return new Response(
+        JSON.stringify({ status: "ok", target: TARGET_DOMAIN || "not-set" }),
+        { headers: { "content-type": "application/json" } }
+      );
+    }
 
-  if (!TARGET_DOMAIN) {
-    return errorResponse("TARGET_DOMAIN environment variable is missing", 500);
-  }
+    if (!TARGET_DOMAIN) {
+      return errorResponse("TARGET_DOMAIN environment variable is missing", 500);
+    }
+    let targetUrl;
+    try {
+      targetUrl = buildTargetUrl(req.url);
+      new URL(targetUrl);
+    } catch {
+      return errorResponse("Invalid TARGET_DOMAIN or request URL", 500);
+    }
 
-  let targetUrl;
-  try {    targetUrl = buildTargetUrl(req.url);
-    new URL(targetUrl);
-  } catch {
-    return errorResponse("Invalid TARGET_DOMAIN or request URL", 500);
-  }
+    const method = req.method.toUpperCase();
+    const options = {
+      method,
+      headers: makeRequestHeaders(req),
+      redirect: "manual"
+    };
 
-  const method = req.method.toUpperCase();
-  const options = {
-    method,
-    headers: makeRequestHeaders(req),
-    redirect: "manual"
-  };
+    // فقط برای متدهایی که body دارند، body را اضافه می‌کنیم
+    // در Deno Deploy نیازی به duplex: "half" نیست
+    if (!["GET", "HEAD"].includes(method)) {
+      options.body = req.body;
+    }
 
-  // فقط برای متدهایی که body دارند، body را اضافه می‌کنیم
-  // در Deno Deploy نیازی به duplex: "half" نیست
-  if (!["GET", "HEAD"].includes(method)) {
-    options.body = req.body;
+    try {
+      const upstream = await fetch(targetUrl, options);
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: makeResponseHeaders(upstream.headers)
+      });
+    } catch (err) {
+      console.error("Relay error:", err?.message || err);
+      return errorResponse(
+        "Could not reach TARGET_DOMAIN: " + (err?.message || "unknown error"),
+        502
+      );
+    }
   }
-
-  try {
-    const upstream = await fetch(targetUrl, options);
-    return new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: makeResponseHeaders(upstream.headers)
-    });
-  } catch (err) {
-    console.error("Relay error:", err?.message || err);
-    return errorResponse(
-      "Could not reach TARGET_DOMAIN: " + (err?.message || "unknown error"),
-      502
-    );
-  }
-}
+};
